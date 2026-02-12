@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
@@ -9,7 +10,15 @@ namespace Main.Character.AI
 {
     public class AiFishManager : MonoBehaviour
     {
+        private const int THREAD_GROUP_SIZE = 64;
+
         public static AiFishManager Instance;
+
+        [SerializeField]
+        private AiSimulationMode simulationMode = AiSimulationMode.CpuJob;
+
+        [SerializeField]
+        private ComputeShader fishAiCompute;
 
         [SerializeField]
         private RectTransform aiFishArea;
@@ -22,6 +31,11 @@ namespace Main.Character.AI
         public int FishCount => fishList.Count;
 
         private JobHandle jobHandle;
+        private int computeKernelIndex = -1;
+        private ComputeBuffer inputBuffer;
+        private ComputeBuffer outputBuffer;
+        private FishInputGpu[] inputCache;
+        private FishOutputGpu[] outputCache;
 
         public const float VISION_RANGE = 5f;
         public const float VISION_ANGLE = 120f;
@@ -31,11 +45,35 @@ namespace Main.Character.AI
         private void Awake()
         {
             Instance = this;
+
+            if (fishAiCompute != null)
+            {
+                computeKernelIndex = fishAiCompute.FindKernel("CSMain");
+            }
+        }
+
+        private void OnDestroy()
+        {
+            ReleaseGpuBuffers();
         }
 
         private void Update()
         {
             if (fishList.Count == 0)
+                return;
+
+            if (simulationMode == AiSimulationMode.HlslCompute)
+            {
+                UpdateHlslAi();
+                return;
+            }
+
+            UpdateCpuAi();
+        }
+
+        private void UpdateCpuAi()
+        {
+            if (aiFishArea == null)
                 return;
 
             var fishesCount = fishList.Count;
@@ -112,6 +150,116 @@ namespace Main.Character.AI
             outputResults.Dispose();
         }
 
+        private void UpdateHlslAi()
+        {
+            if (fishAiCompute == null || computeKernelIndex < 0 || aiFishArea == null)
+                return;
+
+            EnsureGpuBuffers(fishList.Count);
+            FillGpuInput();
+            inputBuffer.SetData(inputCache);
+
+            fishAiCompute.SetInt("FishCount", fishList.Count);
+            fishAiCompute.SetFloat("CurrentTime", Time.time);
+            fishAiCompute.SetFloat("MaxSearchDistanceSqr", VISION_RANGE * VISION_RANGE);
+            fishAiCompute.SetFloat("MaxVisionCos", Mathf.Cos(Mathf.Deg2Rad * (VISION_ANGLE * 0.5f)));
+            fishAiCompute.SetFloat("FocusTargetDuration", FOCUS_TARGET_DURATION);
+
+            Vector2 areaCenter = aiFishArea.position;
+            Vector2 areaSize = aiFishArea.rect.size;
+            fishAiCompute.SetVector("AreaCenter", new Vector4(areaCenter.x, areaCenter.y, 0f, 0f));
+            fishAiCompute.SetVector("AreaSize", new Vector4(areaSize.x, areaSize.y, 0f, 0f));
+
+            fishAiCompute.SetBuffer(computeKernelIndex, "InputFishes", inputBuffer);
+            fishAiCompute.SetBuffer(computeKernelIndex, "OutputFishes", outputBuffer);
+
+            int groupCount = Mathf.CeilToInt(fishList.Count / (float)THREAD_GROUP_SIZE);
+            fishAiCompute.Dispatch(computeKernelIndex, groupCount, 1, 1);
+
+            outputBuffer.GetData(outputCache);
+            ApplyGpuOutput();
+        }
+
+        private void FillGpuInput()
+        {
+            for (int i = 0; i < fishList.Count; i++)
+            {
+                Fish fish = fishList[i];
+                Transform fishTransform = fish.transform;
+
+                int state = (int)State.Idle;
+                float focusingTime = 0f;
+                Vector2 targetPosition = fishTransform.position;
+
+                if (fish.TryGetComponent<AiFish>(out var aiFish))
+                {
+                    state = (int)aiFish.CurrentState;
+                    focusingTime = aiFish.FocusingTime;
+                    targetPosition = new Vector2(aiFish.TargetPosition.x, aiFish.TargetPosition.y);
+                }
+
+                Vector2 position = fishTransform.position;
+                Vector2 forward = fishTransform.right;
+                if (forward.sqrMagnitude > 0f)
+                {
+                    forward.Normalize();
+                }
+
+                inputCache[i] = new FishInputGpu
+                {
+                    PositionForward = new Vector4(position.x, position.y, forward.x, forward.y),
+                    TargetSizeState = new Vector4(targetPosition.x, targetPosition.y, fish.GetSize(), state),
+                    FocusPlayerIndex = new Vector4(focusingTime, fish is PlayerCharacter ? 1f : 0f, i, 0f),
+                };
+            }
+        }
+
+        private void ApplyGpuOutput()
+        {
+            for (int i = 0; i < fishList.Count; i++)
+            {
+                if (!fishList[i].TryGetComponent<AiFish>(out var aiFish))
+                    continue;
+
+                FishOutputGpu output = outputCache[i];
+                Vector4 value = output.TargetStateFocus;
+
+                aiFish.TargetPosition = new float2(value.x, value.y);
+                aiFish.CurrentState = (State)Mathf.RoundToInt(value.z);
+                aiFish.FocusingTime = value.w;
+                aiFish.UpdateMovement();
+            }
+        }
+
+        private void EnsureGpuBuffers(int fishCount)
+        {
+            bool rebuild =
+                inputBuffer == null ||
+                outputBuffer == null ||
+                inputCache == null ||
+                outputCache == null ||
+                inputCache.Length != fishCount;
+
+            if (!rebuild)
+                return;
+
+            ReleaseGpuBuffers();
+
+            inputCache = new FishInputGpu[fishCount];
+            outputCache = new FishOutputGpu[fishCount];
+
+            inputBuffer = new ComputeBuffer(fishCount, Marshal.SizeOf<FishInputGpu>());
+            outputBuffer = new ComputeBuffer(fishCount, Marshal.SizeOf<FishOutputGpu>());
+        }
+
+        private void ReleaseGpuBuffers()
+        {
+            inputBuffer?.Release();
+            outputBuffer?.Release();
+            inputBuffer = null;
+            outputBuffer = null;
+        }
+
         public void FetchAllFish()
         {
             fishList.Clear();
@@ -147,6 +295,26 @@ namespace Main.Character.AI
         Idle = 0,
         Hunting = 1,
         Fleeing = 2,
+    }
+
+    public enum AiSimulationMode
+    {
+        CpuJob = 0,
+        HlslCompute = 1,
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FishInputGpu
+    {
+        public Vector4 PositionForward;
+        public Vector4 TargetSizeState;
+        public Vector4 FocusPlayerIndex;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FishOutputGpu
+    {
+        public Vector4 TargetStateFocus;
     }
 
     public struct FishJobInput

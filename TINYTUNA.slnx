@@ -3,9 +3,7 @@
   <Project Path="NaughtyAttributes.Core.csproj" />
   <Project Path="BetterHierarchy.csproj" />
   <Project Path="NaughtyAttributes.Editor.csproj" />
-  <Project Path="PrimeTween.Debug.csproj" />
   <Project Path="Assembly-CSharp.csproj" />
-  <Project Path="PrimeTween.Demo.csproj" />
   <Project Path="Assembly-CSharp-Editor.csproj" />
   <Project Path="PrimeTween.Installer.csproj" />
 </Solution>

@@ -494,6 +494,10 @@ PrefabInstance:
       propertyPath: m_AnchoredPosition.y
       value: -3.4397278
       objectReference: {fileID: 0}
+    - target: {fileID: 6927191835597510507, guid: 747042df23fb9c043b5320aaada071c8, type: 3}
+      propertyPath: m_fontSize
+      value: 38.8
+      objectReference: {fileID: 0}
     - target: {fileID: 7905893881281400258, guid: 747042df23fb9c043b5320aaada071c8, type: 3}
       propertyPath: m_Name
       value: Score - Canvas
@@ -737,6 +741,7 @@ MonoBehaviour:
   m_VerticalAlignment: 512
   m_textAlignment: 65535
   m_characterSpacing: 0
+  m_characterHorizontalScale: 1
   m_wordSpacing: 0
   m_lineSpacing: 0
   m_lineSpacingMax: 0
@@ -873,6 +878,7 @@ MonoBehaviour:
   m_VerticalAlignment: 256
   m_textAlignment: 65535
   m_characterSpacing: 0
+  m_characterHorizontalScale: 1
   m_wordSpacing: 0
   m_lineSpacing: 0
   m_lineSpacingMax: 0
@@ -1361,7 +1367,7 @@ MonoBehaviour:
   playerHealthUI: {fileID: 8585054743163661856}
   currentProgress: 0
   progressUI: {fileID: 120105688}
-  startSpawnAmount: 200
+  startSpawnAmount: 2000
   winSceneName: WinScene
   loseSceneName: LoseScene
 --- !u!114 &361681544
@@ -2534,6 +2540,7 @@ MonoBehaviour:
   m_VerticalAlignment: 256
   m_textAlignment: 65535
   m_characterSpacing: 0
+  m_characterHorizontalScale: 1
   m_wordSpacing: 0
   m_lineSpacing: 0
   m_lineSpacingMax: 0
@@ -2926,6 +2933,7 @@ MonoBehaviour:
   m_VerticalAlignment: 512
   m_textAlignment: 65535
   m_characterSpacing: 0
+  m_characterHorizontalScale: 1
   m_wordSpacing: 0
   m_lineSpacing: 0
   m_lineSpacingMax: 0
@@ -3477,6 +3485,7 @@ MonoBehaviour:
   m_VerticalAlignment: 512
   m_textAlignment: 65535
   m_characterSpacing: 0
+  m_characterHorizontalScale: 1
   m_wordSpacing: 0
   m_lineSpacing: 0
   m_lineSpacingMax: 0
@@ -3552,6 +3561,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b48d9c54c49a424408d5cabc3f0b8342, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Main.Character.AI.AiFishManager
+  simulationMode: 1
+  fishAiCompute: {fileID: 7200000, guid: 2d6eddb67f17e488f8ac7faffa7990d5, type: 3}
   aiFishArea: {fileID: 350588677}
   playerCharacter: {fileID: 414518170}
   fishList: []
@@ -4526,6 +4537,7 @@ PolygonCollider2D:
   m_UseDelaunayMesh: 0
 --- !u!212 &1602231519
 SpriteRenderer:
+  serializedVersion: 2
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
@@ -4571,6 +4583,7 @@ SpriteRenderer:
   m_SortingLayerID: 1788357379
   m_SortingLayer: 1
   m_SortingOrder: 1
+  m_MaskInteraction: 0
   m_Sprite: {fileID: -1184278384, guid: c86d5fcfa4528a540b277c1a3602cc8d, type: 3}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
   m_FlipX: 0
@@ -4580,7 +4593,6 @@ SpriteRenderer:
   m_AdaptiveModeThreshold: 0.5
   m_SpriteTileMode: 0
   m_WasSpriteAssigned: 1
-  m_MaskInteraction: 0
   m_SpriteSortPoint: 0
 --- !u!4 &1611073070 stripped
 Transform:
@@ -4757,6 +4769,7 @@ MonoBehaviour:
   m_VerticalAlignment: 256
   m_textAlignment: 65535
   m_characterSpacing: 0
+  m_characterHorizontalScale: 1
   m_wordSpacing: 0
   m_lineSpacing: 0
   m_lineSpacingMax: 0
@@ -5028,6 +5041,7 @@ MonoBehaviour:
   m_VerticalAlignment: 512
   m_textAlignment: 65535
   m_characterSpacing: 0
+  m_characterHorizontalScale: 1
   m_wordSpacing: 0
   m_lineSpacing: 0
   m_lineSpacingMax: 0
@@ -5244,6 +5258,7 @@ MonoBehaviour:
   m_VerticalAlignment: 256
   m_textAlignment: 65535
   m_characterSpacing: 0
+  m_characterHorizontalScale: 1
   m_wordSpacing: 0
   m_lineSpacing: 0
   m_lineSpacingMax: 0
@@ -5455,6 +5470,7 @@ MonoBehaviour:
   m_VerticalAlignment: 512
   m_textAlignment: 65535
   m_characterSpacing: 0
+  m_characterHorizontalScale: 1
   m_wordSpacing: 0
   m_lineSpacing: 0
   m_lineSpacingMax: 0
@@ -5525,6 +5541,7 @@ SortingGroup:
   m_SortingLayer: 0
   m_SortingOrder: 0
   m_SortAtRoot: 0
+  m_Sort3DAs2D: 0
 --- !u!4 &1910634386
 Transform:
   m_ObjectHideFlags: 0

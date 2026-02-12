@@ -1,0 +1,211 @@
+#pragma kernel CSMain
+
+struct FishInputGpu
+{
+    float4 PositionForward;      // xy = position, zw = forward
+    float4 TargetSizeState;      // xy = current target, z = size, w = state
+    float4 FocusPlayerIndex;     // x = focusingTime, y = isPlayer, z = index
+};
+
+struct FishOutputGpu
+{
+    float4 TargetStateFocus;     // xy = target, z = state, w = focusingTime
+};
+
+StructuredBuffer<FishInputGpu> InputFishes;
+RWStructuredBuffer<FishOutputGpu> OutputFishes;
+
+int FishCount;
+float CurrentTime;
+float MaxSearchDistanceSqr;
+float MaxVisionCos;
+float FocusTargetDuration;
+float4 AreaCenter;
+float4 AreaSize;
+
+float Hash01(float2 p)
+{
+    float h = dot(p, float2(127.1, 311.7));
+    return frac(sin(h) * 43758.5453123);
+}
+
+bool IsInVisionCone(float2 ownPos, float2 ownForward, float2 targetPos)
+{
+    float2 toTarget = targetPos - ownPos;
+    float lenSq = dot(toTarget, toTarget);
+    if (lenSq <= 0.00001)
+        return true;
+
+    float2 direction = normalize(toTarget);
+    float dotProduct = dot(ownForward, direction);
+    return dotProduct >= MaxVisionCos;
+}
+
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= FishCount)
+        return;
+
+    FishInputGpu own = InputFishes[index];
+    float2 ownPos = own.PositionForward.xy;
+    float2 ownForward = normalize(own.PositionForward.zw);
+    float2 ownTarget = own.TargetSizeState.xy;
+    float ownSize = own.TargetSizeState.z;
+    int ownState = (int)round(own.TargetSizeState.w);
+    float ownFocusTime = own.FocusPlayerIndex.x;
+
+    float2 newTarget = ownTarget;
+    int newState = ownState;
+    float focusingTime = ownFocusTime;
+    bool foundTarget = false;
+
+    float bestFleeDistance = MaxSearchDistanceSqr;
+    float2 fleeTarget = ownTarget;
+
+    float bestPreyDistance = MaxSearchDistanceSqr;
+    float2 bestPreyTarget = ownTarget;
+
+    bool foundPlayer = false;
+    float bestPlayerDistance = MaxSearchDistanceSqr;
+    float2 playerTarget = ownTarget;
+
+    for (uint i = 0; i < FishCount; i++)
+    {
+        if (i == index)
+            continue;
+
+        FishInputGpu other = InputFishes[i];
+        float2 otherPos = other.PositionForward.xy;
+        float otherSize = other.TargetSizeState.z;
+        bool isPlayer = other.FocusPlayerIndex.y > 0.5;
+
+        float2 delta = otherPos - ownPos;
+        float distSq = dot(delta, delta);
+        if (distSq > MaxSearchDistanceSqr)
+            continue;
+
+        if (!IsInVisionCone(ownPos, ownForward, otherPos))
+            continue;
+
+        if (otherSize > ownSize)
+        {
+            if (distSq < bestFleeDistance)
+            {
+                bestFleeDistance = distSq;
+                float2 fleeDir = normalize(ownPos - otherPos);
+                fleeTarget = ownPos + fleeDir * 20.0;
+                foundTarget = true;
+                newState = 2;
+                focusingTime = CurrentTime + FocusTargetDuration;
+            }
+            continue;
+        }
+
+        if (otherSize < ownSize)
+        {
+            if (isPlayer)
+            {
+                if (distSq < bestPlayerDistance)
+                {
+                    bestPlayerDistance = distSq;
+                    playerTarget = otherPos;
+                    foundPlayer = true;
+                }
+            }
+            else if (distSq < bestPreyDistance)
+            {
+                bestPreyDistance = distSq;
+                bestPreyTarget = otherPos;
+            }
+        }
+    }
+
+    if (foundPlayer)
+    {
+        newTarget = playerTarget;
+        newState = 1;
+        foundTarget = true;
+        focusingTime = CurrentTime + FocusTargetDuration;
+    }
+    else if (bestPreyDistance < MaxSearchDistanceSqr)
+    {
+        newTarget = bestPreyTarget;
+        newState = 1;
+        foundTarget = true;
+        focusingTime = CurrentTime + FocusTargetDuration;
+    }
+    else if (newState == 2)
+    {
+        newTarget = fleeTarget;
+    }
+
+    float2 center = AreaCenter.xy;
+    float2 halfSize = AreaSize.xy * 0.5;
+
+    bool targetOutOfBounds =
+        abs(newTarget.x - center.x) > halfSize.x ||
+        abs(newTarget.y - center.y) > halfSize.y;
+
+    if (newState == 1 && targetOutOfBounds)
+    {
+        newTarget = center;
+        newState = 0;
+        focusingTime = 0.0;
+        foundTarget = true;
+    }
+
+    if (!foundTarget)
+    {
+        bool ownOutOfBounds =
+            abs(ownPos.x - center.x) > halfSize.x ||
+            abs(ownPos.y - center.y) > halfSize.y;
+
+        if (ownOutOfBounds && newState != 1 && newState != 2)
+        {
+            newTarget = center;
+            newState = 0;
+            focusingTime = 0.0;
+            foundTarget = true;
+        }
+
+        if (newState == 1 || newState == 2)
+        {
+            if (CurrentTime >= focusingTime)
+            {
+                newState = 0;
+                focusingTime = 0.0;
+            }
+            else
+            {
+                newTarget = ownPos + ownForward * 20.0;
+                foundTarget = true;
+            }
+        }
+
+        if (newState == 0 && !foundTarget)
+        {
+            float closeDist = distance(ownPos, newTarget);
+            bool idleTargetOutOfBounds =
+                abs(newTarget.x - center.x) > halfSize.x ||
+                abs(newTarget.y - center.y) > halfSize.y;
+
+            if (closeDist < 2.0 || idleTargetOutOfBounds)
+            {
+                float seedBase = own.FocusPlayerIndex.z * 17.0 + CurrentTime * 11.0;
+                float rx = Hash01(ownPos + float2(seedBase, 1.23));
+                float ry = Hash01(ownPos + float2(2.34, seedBase));
+
+                newTarget.x = lerp(center.x - halfSize.x, center.x + halfSize.x, rx);
+                newTarget.y = lerp(center.y - halfSize.y, center.y + halfSize.y, ry);
+            }
+
+            newState = 0;
+        }
+    }
+
+    FishOutputGpu output;
+    output.TargetStateFocus = float4(newTarget.xy, (float)newState, focusingTime);
+    OutputFishes[index] = output;
+}

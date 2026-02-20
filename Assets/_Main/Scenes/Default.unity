@@ -3565,7 +3565,7 @@ MonoBehaviour:
   fishAiCompute: {fileID: 7200000, guid: 2d6eddb67f17e488f8ac7faffa7990d5, type: 3}
   aiFishArea: {fileID: 350588677}
   playerCharacter: {fileID: 414518170}
-  activeAreaPadding: 10
+  activeAreaPadding: 1
   fishList: []
 --- !u!4 &1139092448
 Transform:

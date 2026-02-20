@@ -68,7 +68,7 @@ pub extern "C" fn process_fish_ai(
     input_ptr: *const FishJobInput,
     output_ptr: *mut FishJobOutput,
     fish_count: i32,
-    max_search_distance: f32,
+    max_search_distance_sq: f32,
     max_vision_angle_cos: f32,
     current_time: f32,
     area_center: Float2,
@@ -84,12 +84,19 @@ pub extern "C" fn process_fish_ai(
     let outputs = unsafe { std::slice::from_raw_parts_mut(output_ptr, fish_count as usize) };
 
     let focus_target_duration = 2.0;
+    let max_search_dist_sqrt = max_search_distance_sq.sqrt();
 
-    for i in 0..(fish_count as usize) {
+    let mut sorted_indices: Vec<usize> = (0..(fish_count as usize)).collect();
+    sorted_indices.sort_unstable_by(|&a, &b| {
+        inputs[a].position.x.partial_cmp(&inputs[b].position.x).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for k in 0..(fish_count as usize) {
+        let i = sorted_indices[k];
         let own_input = &inputs[i];
         let own_size = own_input.size;
         let own_position = own_input.position;
-        let mut closest_target = max_search_distance;
+        let mut closest_target = max_search_distance_sq;
 
         let mut new_target_pos = own_input.current_target_position;
         let mut new_state = own_input.current_state_int;
@@ -97,11 +104,10 @@ pub extern "C" fn process_fish_ai(
         let mut focusing_time = own_input.focusing_time;
 
         let mut player_target_pos = Float2 { x: 0.0, y: 0.0 };
-        let mut player_distance = max_search_distance;
         let mut found_player = false;
         
         let mut closest_prey_pos = Float2 { x: 0.0, y: 0.0 };
-        let mut closest_prey_distance = max_search_distance;
+        let mut closest_prey_distance = max_search_distance_sq;
 
         let diff_x = (own_position.x - active_area_center.x).abs();
         let diff_y = (own_position.y - active_area_center.y).abs();
@@ -116,51 +122,66 @@ pub extern "C" fn process_fish_ai(
             continue;
         }
 
-        for j in 0..(fish_count as usize) {
-            if i == j { continue; }
-
-            let other_fish = &inputs[j];
-            let dist_vec = Float2 {
-                x: other_fish.position.x - own_position.x,
-                y: other_fish.position.y - own_position.y,
-            };
-            let dist_sq = length_sq(dist_vec);
-
-            if dist_sq > max_search_distance {
-                continue;
-            }
-
-            // check vision cone
-            let dir_to_target = normalize(dist_vec);
-            let dot_prod = dot(own_input.forward_direction, dir_to_target);
-            if dot_prod < max_vision_angle_cos {
-                continue;
-            }
-
-            if other_fish.is_player && other_fish.size < own_size {
-                player_target_pos = other_fish.position;
-                player_distance = dist_sq;
-                found_player = true;
-            }
-
-            if !other_fish.is_player && other_fish.size < own_size {
-                if dist_sq < closest_prey_distance {
-                    closest_prey_pos = other_fish.position;
-                    closest_prey_distance = dist_sq;
-                }
-            } else if other_fish.size > own_size {
-                if dist_sq < closest_target * 1.5 || new_state != 2 { // 2 = Fleeing
-                    let flee_dir = normalize(Float2 { x: -dist_vec.x, y: -dist_vec.y }); // Fleeing away
-                    new_target_pos = Float2 {
-                        x: own_position.x + flee_dir.x * 20.0,
-                        y: own_position.y + flee_dir.y * 20.0,
+        macro_rules! check_neighbor {
+            ($j:expr) => {
+                if i != $j {
+                    let other_fish = &inputs[$j];
+                    let dist_vec = Float2 {
+                        x: other_fish.position.x - own_position.x,
+                        y: other_fish.position.y - own_position.y,
                     };
-                    new_state = 2; // Fleeing
-                    closest_target = dist_sq;
-                    is_found_target = true;
-                    focusing_time = current_time + focus_target_duration;
+                    let dist_sq = length_sq(dist_vec);
+
+                    if dist_sq <= max_search_distance_sq {
+                        // check vision cone
+                        let dir_to_target = normalize(dist_vec);
+                        let dot_prod = dot(own_input.forward_direction, dir_to_target);
+                        if dot_prod >= max_vision_angle_cos {
+                            if other_fish.is_player && other_fish.size < own_size {
+                                player_target_pos = other_fish.position;
+                                found_player = true;
+                            }
+
+                            if !other_fish.is_player && other_fish.size < own_size {
+                                if dist_sq < closest_prey_distance {
+                                    closest_prey_pos = other_fish.position;
+                                    closest_prey_distance = dist_sq;
+                                }
+                            } else if other_fish.size > own_size {
+                                if dist_sq < closest_target * 1.5 || new_state != 2 { // 2 = Fleeing
+                                    let flee_dir = normalize(Float2 { x: -dist_vec.x, y: -dist_vec.y }); // Fleeing away
+                                    new_target_pos = Float2 {
+                                        x: own_position.x + flee_dir.x * 20.0,
+                                        y: own_position.y + flee_dir.y * 20.0,
+                                    };
+                                    new_state = 2; // Fleeing
+                                    closest_target = dist_sq;
+                                    is_found_target = true;
+                                    focusing_time = current_time + focus_target_duration;
+                                }
+                            }
+                        }
+                    }
                 }
+            };
+        }
+
+        // Sweep right
+        for m in (k + 1)..(fish_count as usize) {
+            let j = sorted_indices[m];
+            if inputs[j].position.x - own_position.x > max_search_dist_sqrt {
+                break;
             }
+            check_neighbor!(j);
+        }
+
+        // Sweep left
+        for m in (0..k).rev() {
+            let j = sorted_indices[m];
+            if own_position.x - inputs[j].position.x > max_search_dist_sqrt {
+                break;
+            }
+            check_neighbor!(j);
         }
 
         if found_player {
@@ -168,7 +189,7 @@ pub extern "C" fn process_fish_ai(
             new_state = 1; // Hunting
             is_found_target = true;
             focusing_time = current_time + focus_target_duration;
-        } else if closest_prey_distance < max_search_distance {
+        } else if closest_prey_distance < max_search_distance_sq {
             new_target_pos = closest_prey_pos;
             new_state = 1; // Hunting
             is_found_target = true;

@@ -33,7 +33,8 @@ namespace Main.Character.AI
 
         [SerializeField, ReadOnly]
         private List<Fish> fishList = new List<Fish>();
-        public int FishCount => fishList.Count;
+        private FishCache[] fishCacheArray = new FishCache[0];
+        public int FishCount => fishCacheArray.Length;
 
         private JobHandle jobHandle;
         private int computeKernelIndex = -1;
@@ -64,29 +65,10 @@ namespace Main.Character.AI
 
         private void Update()
         {
-            if (fishList.Count == 0)
+            if (fishCacheArray.Length == 0)
                 return;
 
             GetActiveAreaBounds(out Vector2 activeCenter, out Vector2 activeExtents);
-
-            // Toggle active state for fish outside the active area
-            for (int i = 0; i < fishList.Count; i++)
-            {
-                var fish = fishList[i];
-                if (fish == null) continue;
-
-                if (fish is PlayerCharacter)
-                    continue;
-
-                Vector2 pos = fish.transform.position;
-                Vector2 diff = new Vector2(Mathf.Abs(pos.x - activeCenter.x), Mathf.Abs(pos.y - activeCenter.y));
-                bool inActiveArea = diff.x <= activeExtents.x && diff.y <= activeExtents.y;
-
-                if (fish.gameObject.activeSelf != inActiveArea)
-                {
-                    fish.gameObject.SetActive(inActiveArea);
-                }
-            }
 
             if (simulationMode == AiSimulationMode.HlslCompute)
             {
@@ -157,7 +139,7 @@ namespace Main.Character.AI
             if (aiFishArea == null)
                 return;
 
-            var fishesCount = fishList.Count;
+            var fishesCount = fishCacheArray.Length;
 
             if (rustInputCache == null || rustInputCache.Length < fishesCount)
             {
@@ -169,30 +151,32 @@ namespace Main.Character.AI
             // Get data
             for (int i = 0; i < fishesCount; i++)
             {
-                var fish = fishList[i];
-                var transform = fish.transform;
+                var cache = fishCacheArray[i];
+                var transform = cache.Transform;
+                
                 var state = (int)State.Idle;
                 var focusingTime = 0f;
-                var targetPos = new float2(transform.position.x, transform.position.y);
-                var isPlayer = fish is PlayerCharacter;
+                var pos = transform.position;
+                var right = transform.right;
+                var targetPos = new float2(pos.x, pos.y);
 
-                if (fish.TryGetComponent<AiFish>(out var aiFish))
+                if (cache.AiFish != null)
                 {
-                    state = (int)aiFish.CurrentState;
-                    focusingTime = aiFish.FocusingTime;
-                    targetPos = new float2(aiFish.TargetPosition.x, aiFish.TargetPosition.y);
+                    state = (int)cache.AiFish.CurrentState;
+                    focusingTime = cache.AiFish.FocusingTime;
+                    targetPos = new float2(cache.AiFish.TargetPosition.x, cache.AiFish.TargetPosition.y);
                 }
 
                 rustInputCache[i] = new FishJobInput
                 {
                     Index = i,
-                    Position = new float2(transform.position.x, transform.position.y),
-                    ForwardDirection = new float2(transform.right.x, transform.right.y),
+                    Position = new float2(pos.x, pos.y),
+                    ForwardDirection = new float2(right.x, right.y),
                     CurrentTargetPosition = targetPos,
-                    Size = fish.GetSize(),
+                    Size = cache.Size,
                     CurrentStateInt = state,
                     FocusingTime = focusingTime,
-                    IsPlayer = isPlayer,
+                    IsPlayer = cache.IsPlayer,
                 };
             }
 
@@ -213,17 +197,17 @@ namespace Main.Character.AI
             // Apply
             for (int i = 0; i < fishesCount; i++)
             {
-                var fish = fishList[i];
+                var cache = fishCacheArray[i];
 
-                if (!fish.TryGetComponent<AiFish>(out var aiFish))
+                if (cache.AiFish == null)
                     continue;
 
                 var output = rustOutputCache[i];
-                aiFish.TargetPosition = output.TargetPosition;
-                aiFish.CurrentState = (State)output.StateInt;
-                aiFish.FocusingTime = output.FocusingTime;
+                cache.AiFish.TargetPosition = output.TargetPosition;
+                cache.AiFish.CurrentState = (State)output.StateInt;
+                cache.AiFish.FocusingTime = output.FocusingTime;
 
-                aiFish.UpdateMovement();
+                cache.AiFish.UpdateMovement();
             }
         }
 
@@ -232,40 +216,39 @@ namespace Main.Character.AI
             if (aiFishArea == null)
                 return;
 
-            var fishesCount = fishList.Count;
+            var fishesCount = fishCacheArray.Length;
             var inputData = new NativeArray<FishJobInput>(fishesCount, Allocator.TempJob);
             var outputResults = new NativeArray<FishJobOutput>(fishesCount, Allocator.TempJob);
 
             // Get data
             for (int i = 0; i < fishesCount; i++)
             {
-                // Fish Data
-                var fish = fishList[i];
-                var transform = fish.transform;
+                var cache = fishCacheArray[i];
+                var transform = cache.Transform;
+                
                 var state = (int)State.Idle;
                 var focusingTime = 0f;
-                var targetPos = new float2(transform.position.x, transform.position.y);
-                var isPlayer = fish is PlayerCharacter;
+                var pos = transform.position;
+                var right = transform.right;
+                var targetPos = new float2(pos.x, pos.y);
 
-                // Get AI State if possible
-                if (fish.TryGetComponent<AiFish>(out var aiFish))
+                if (cache.AiFish != null)
                 {
-                    state = (int)aiFish.CurrentState;
-                    focusingTime = aiFish.FocusingTime;
-                    targetPos = new float2(aiFish.TargetPosition.x, aiFish.TargetPosition.y);
+                    state = (int)cache.AiFish.CurrentState;
+                    focusingTime = cache.AiFish.FocusingTime;
+                    targetPos = new float2(cache.AiFish.TargetPosition.x, cache.AiFish.TargetPosition.y);
                 }
 
-                // Fill Input Data
                 inputData[i] = new FishJobInput
                 {
                     Index = i,
-                    Position = new float2(transform.position.x, transform.position.y),
-                    ForwardDirection = new float2(transform.right.x, transform.right.y),
+                    Position = new float2(pos.x, pos.y),
+                    ForwardDirection = new float2(right.x, right.y),
                     CurrentTargetPosition = targetPos,
-                    Size = fish.GetSize(),
+                    Size = cache.Size,
                     CurrentStateInt = state,
                     FocusingTime = focusingTime,
-                    IsPlayer = isPlayer,
+                    IsPlayer = cache.IsPlayer,
                 };
             }
 
@@ -283,25 +266,25 @@ namespace Main.Character.AI
                 ActiveAreaExtents = activeExtents
             };
 
-            jobHandle = aiJob.Schedule(fishList.Count, jobHandle);
+            jobHandle = aiJob.Schedule(fishesCount, jobHandle);
 
             // Wait for job
             jobHandle.Complete();
 
             // Apply
-            for (int i = 0; i < fishList.Count; i++)
+            for (int i = 0; i < fishesCount; i++)
             {
-                var fish = fishList[i];
+                var cache = fishCacheArray[i];
 
-                if (!fish.TryGetComponent<AiFish>(out var aiFish))
+                if (cache.AiFish == null)
                     continue;
 
                 var output = outputResults[i];
-                aiFish.TargetPosition = output.TargetPosition;
-                aiFish.CurrentState = (State)output.StateInt;
-                aiFish.FocusingTime = output.FocusingTime;
+                cache.AiFish.TargetPosition = output.TargetPosition;
+                cache.AiFish.CurrentState = (State)output.StateInt;
+                cache.AiFish.FocusingTime = output.FocusingTime;
 
-                aiFish.UpdateMovement();
+                cache.AiFish.UpdateMovement();
             }
 
             inputData.Dispose();
@@ -313,11 +296,11 @@ namespace Main.Character.AI
             if (fishAiCompute == null || computeKernelIndex < 0 || aiFishArea == null)
                 return;
 
-            EnsureGpuBuffers(fishList.Count);
+            EnsureGpuBuffers(fishCacheArray.Length);
             FillGpuInput();
             inputBuffer.SetData(inputCache);
 
-            fishAiCompute.SetInt("FishCount", fishList.Count);
+            fishAiCompute.SetInt("FishCount", fishCacheArray.Length);
             fishAiCompute.SetFloat("CurrentTime", Time.time);
             fishAiCompute.SetFloat("MaxSearchDistanceSqr", VISION_RANGE * VISION_RANGE);
             fishAiCompute.SetFloat("MaxVisionCos", Mathf.Cos(Mathf.Deg2Rad * (VISION_ANGLE * 0.5f)));
@@ -331,7 +314,7 @@ namespace Main.Character.AI
             fishAiCompute.SetBuffer(computeKernelIndex, "InputFishes", inputBuffer);
             fishAiCompute.SetBuffer(computeKernelIndex, "OutputFishes", outputBuffer);
 
-            int groupCount = Mathf.CeilToInt(fishList.Count / (float)THREAD_GROUP_SIZE);
+            int groupCount = Mathf.CeilToInt(fishCacheArray.Length / (float)THREAD_GROUP_SIZE);
             fishAiCompute.Dispatch(computeKernelIndex, groupCount, 1, 1);
 
             outputBuffer.GetData(outputCache);
@@ -340,20 +323,20 @@ namespace Main.Character.AI
 
         private void FillGpuInput()
         {
-            for (int i = 0; i < fishList.Count; i++)
+            for (int i = 0; i < fishCacheArray.Length; i++)
             {
-                Fish fish = fishList[i];
-                Transform fishTransform = fish.transform;
+                var cache = fishCacheArray[i];
+                Transform fishTransform = cache.Transform;
 
                 int state = (int)State.Idle;
                 float focusingTime = 0f;
                 Vector2 targetPosition = fishTransform.position;
 
-                if (fish.TryGetComponent<AiFish>(out var aiFish))
+                if (cache.AiFish != null)
                 {
-                    state = (int)aiFish.CurrentState;
-                    focusingTime = aiFish.FocusingTime;
-                    targetPosition = new Vector2(aiFish.TargetPosition.x, aiFish.TargetPosition.y);
+                    state = (int)cache.AiFish.CurrentState;
+                    focusingTime = cache.AiFish.FocusingTime;
+                    targetPosition = new Vector2(cache.AiFish.TargetPosition.x, cache.AiFish.TargetPosition.y);
                 }
 
                 Vector2 position = fishTransform.position;
@@ -366,26 +349,27 @@ namespace Main.Character.AI
                 inputCache[i] = new FishInputGpu
                 {
                     PositionForward = new Vector4(position.x, position.y, forward.x, forward.y),
-                    TargetSizeState = new Vector4(targetPosition.x, targetPosition.y, fish.GetSize(), state),
-                    FocusPlayerIndex = new Vector4(focusingTime, fish is PlayerCharacter ? 1f : 0f, i, 0f),
+                    TargetSizeState = new Vector4(targetPosition.x, targetPosition.y, cache.Size, state),
+                    FocusPlayerIndex = new Vector4(focusingTime, cache.IsPlayer ? 1f : 0f, i, 0f),
                 };
             }
         }
 
         private void ApplyGpuOutput()
         {
-            for (int i = 0; i < fishList.Count; i++)
+            for (int i = 0; i < fishCacheArray.Length; i++)
             {
-                if (!fishList[i].TryGetComponent<AiFish>(out var aiFish))
+                var cache = fishCacheArray[i];
+                if (cache.AiFish == null)
                     continue;
 
                 FishOutputGpu output = outputCache[i];
                 Vector4 value = output.TargetStateFocus;
 
-                aiFish.TargetPosition = new float2(value.x, value.y);
-                aiFish.CurrentState = (State)Mathf.RoundToInt(value.z);
-                aiFish.FocusingTime = value.w;
-                aiFish.UpdateMovement();
+                cache.AiFish.TargetPosition = new float2(value.x, value.y);
+                cache.AiFish.CurrentState = (State)Mathf.RoundToInt(value.z);
+                cache.AiFish.FocusingTime = value.w;
+                cache.AiFish.UpdateMovement();
             }
         }
 
@@ -427,7 +411,11 @@ namespace Main.Character.AI
             if (playerCharacter != null)
             {
                 fishList.Add(playerCharacter);
-                playerCharacter.OnDeath += () => fishList.Remove(playerCharacter);
+                playerCharacter.OnDeath += () => 
+                {
+                    fishList.Remove(playerCharacter);
+                    BuildFishCache();
+                };
             }
 
             // Add AI Fishes
@@ -435,10 +423,34 @@ namespace Main.Character.AI
             foreach (var aiFish in aiFishes)
             {
                 fishList.Add(aiFish);
-                aiFish.OnDeath += () => fishList.Remove(aiFish);
+                aiFish.OnDeath += () => 
+                {
+                    fishList.Remove(aiFish);
+                    BuildFishCache();
+                };
             }
+            
+            BuildFishCache();
 
             Debug.Log($"[AiFishManager] Fetched {aiFishes.Length} Fishes.");
+        }
+
+        private void BuildFishCache()
+        {
+            fishCacheArray = new FishCache[fishList.Count];
+            for (int i = 0; i < fishList.Count; i++)
+            {
+                var f = fishList[i];
+                var aiFish = f as AiFish;
+                fishCacheArray[i] = new FishCache
+                {
+                    Fish = f,
+                    AiFish = aiFish,
+                    Transform = f.transform,
+                    IsPlayer = f is PlayerCharacter,
+                    Size = f.GetSize()
+                };
+            }
         }
 
         private void OnDrawGizmos()
@@ -496,6 +508,15 @@ namespace Main.Character.AI
         public float2 TargetPosition;
         public int StateInt; // For Job
         public float FocusingTime;
+    }
+
+    public struct FishCache
+    {
+        public Fish Fish;
+        public AiFish AiFish;
+        public Transform Transform;
+        public bool IsPlayer;
+        public float Size;
     }
 
     [BurstCompile]

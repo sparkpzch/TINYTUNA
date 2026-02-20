@@ -1,7 +1,9 @@
+using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Unity.Burst;
 using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
@@ -25,6 +27,9 @@ namespace Main.Character.AI
 
         [SerializeField]
         private PlayerCharacter playerCharacter;
+
+        [SerializeField, Tooltip("Padding added to camera view to form active simulation area")]
+        private float activeAreaPadding = 10f;
 
         [SerializeField, ReadOnly]
         private List<Fish> fishList = new List<Fish>();
@@ -62,16 +67,167 @@ namespace Main.Character.AI
             if (fishList.Count == 0)
                 return;
 
+            GetActiveAreaBounds(out Vector2 activeCenter, out Vector2 activeExtents);
+
+            // Toggle active state for fish outside the active area
+            for (int i = 0; i < fishList.Count; i++)
+            {
+                var fish = fishList[i];
+                if (fish == null) continue;
+
+                if (fish is PlayerCharacter)
+                    continue;
+
+                Vector2 pos = fish.transform.position;
+                Vector2 diff = new Vector2(Mathf.Abs(pos.x - activeCenter.x), Mathf.Abs(pos.y - activeCenter.y));
+                bool inActiveArea = diff.x <= activeExtents.x && diff.y <= activeExtents.y;
+
+                if (fish.gameObject.activeSelf != inActiveArea)
+                {
+                    fish.gameObject.SetActive(inActiveArea);
+                }
+            }
+
             if (simulationMode == AiSimulationMode.HlslCompute)
             {
-                UpdateHlslAi();
+                UpdateHlslAi(activeCenter, activeExtents);
+                return;
+            }
+            if (simulationMode == AiSimulationMode.RustNative)
+            {
+                UpdateRustAi(activeCenter, activeExtents);
                 return;
             }
 
-            UpdateCpuAi();
+            UpdateCpuAi(activeCenter, activeExtents);
         }
 
-        private void UpdateCpuAi()
+        private void GetActiveAreaBounds(out Vector2 center, out Vector2 extents)
+        {
+            Camera cam = Camera.main;
+            if (cam != null)
+            {
+                center = cam.transform.position;
+                if (cam.orthographic)
+                {
+                    float height = cam.orthographicSize;
+                    float width = height * cam.aspect;
+                    extents = new Vector2(width + activeAreaPadding, height + activeAreaPadding);
+                }
+                else
+                {
+                    // Approximate for perspective at z=0
+                    float distance = Mathf.Abs(cam.transform.position.z);
+                    float frustumHeight = 2.0f * distance * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
+                    float frustumWidth = frustumHeight * cam.aspect;
+                    extents = new Vector2(frustumWidth * 0.5f + activeAreaPadding, frustumHeight * 0.5f + activeAreaPadding);
+                }
+            }
+            else if (playerCharacter != null)
+            {
+                center = playerCharacter.transform.position;
+                extents = new Vector2(25f + activeAreaPadding, 25f + activeAreaPadding); // Fallback
+            }
+            else
+            {
+                center = aiFishArea != null ? (Vector2)aiFishArea.position : Vector2.zero;
+                extents = aiFishArea != null ? new Vector2(aiFishArea.rect.width * 0.5f, aiFishArea.rect.height * 0.5f) : new Vector2(50f, 50f);
+            }
+        }
+
+        private FishJobInput[] rustInputCache;
+        private FishJobOutput[] rustOutputCache;
+
+        [DllImport("rust_tuna_ai", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void process_fish_ai(
+            [In] FishJobInput[] inputPtr,
+            [Out] FishJobOutput[] outputPtr,
+            int fishCount,
+            float maxSearchDistance,
+            float maxVisionAngleCos,
+            float currentTime,
+            float2 areaCenter,
+            float2 areaSize,
+            float2 activeAreaCenter,
+            float2 activeAreaExtents
+        );
+
+        private void UpdateRustAi(Vector2 activeCenter, Vector2 activeExtents)
+        {
+            if (aiFishArea == null)
+                return;
+
+            var fishesCount = fishList.Count;
+
+            if (rustInputCache == null || rustInputCache.Length < fishesCount)
+            {
+                int newSize = Mathf.Max(fishesCount, rustInputCache?.Length * 2 ?? 256);
+                rustInputCache = new FishJobInput[newSize];
+                rustOutputCache = new FishJobOutput[newSize];
+            }
+
+            // Get data
+            for (int i = 0; i < fishesCount; i++)
+            {
+                var fish = fishList[i];
+                var transform = fish.transform;
+                var state = (int)State.Idle;
+                var focusingTime = 0f;
+                var targetPos = new float2(transform.position.x, transform.position.y);
+                var isPlayer = fish is PlayerCharacter;
+
+                if (fish.TryGetComponent<AiFish>(out var aiFish))
+                {
+                    state = (int)aiFish.CurrentState;
+                    focusingTime = aiFish.FocusingTime;
+                    targetPos = new float2(aiFish.TargetPosition.x, aiFish.TargetPosition.y);
+                }
+
+                rustInputCache[i] = new FishJobInput
+                {
+                    Index = i,
+                    Position = new float2(transform.position.x, transform.position.y),
+                    ForwardDirection = new float2(transform.right.x, transform.right.y),
+                    CurrentTargetPosition = targetPos,
+                    Size = fish.GetSize(),
+                    CurrentStateInt = state,
+                    FocusingTime = focusingTime,
+                    IsPlayer = isPlayer,
+                };
+            }
+
+            // Call Rust
+            process_fish_ai(
+                rustInputCache,
+                rustOutputCache,
+                fishesCount,
+                VISION_RANGE * VISION_RANGE,
+                math.cos(math.radians(VISION_ANGLE) / 2f),
+                Time.time,
+                new float2(aiFishArea.position.x, aiFishArea.position.y),
+                new float2(aiFishArea.rect.width, aiFishArea.rect.height),
+                new float2(activeCenter.x, activeCenter.y),
+                new float2(activeExtents.x, activeExtents.y)
+            );
+
+            // Apply
+            for (int i = 0; i < fishesCount; i++)
+            {
+                var fish = fishList[i];
+
+                if (!fish.TryGetComponent<AiFish>(out var aiFish))
+                    continue;
+
+                var output = rustOutputCache[i];
+                aiFish.TargetPosition = output.TargetPosition;
+                aiFish.CurrentState = (State)output.StateInt;
+                aiFish.FocusingTime = output.FocusingTime;
+
+                aiFish.UpdateMovement();
+            }
+        }
+
+        private void UpdateCpuAi(Vector2 activeCenter, Vector2 activeExtents)
         {
             if (aiFishArea == null)
                 return;
@@ -122,7 +278,9 @@ namespace Main.Character.AI
                 MaxVisionAngle = math.cos(math.radians(VISION_ANGLE) / 2f),
                 CurrentTime = Time.time,
                 AreaCenter = new float2(aiFishArea.position.x, aiFishArea.position.y),
-                AreaSize = new float2(aiFishArea.rect.width, aiFishArea.rect.height)
+                AreaSize = new float2(aiFishArea.rect.width, aiFishArea.rect.height),
+                ActiveAreaCenter = activeCenter,
+                ActiveAreaExtents = activeExtents
             };
 
             jobHandle = aiJob.Schedule(fishList.Count, jobHandle);
@@ -150,7 +308,7 @@ namespace Main.Character.AI
             outputResults.Dispose();
         }
 
-        private void UpdateHlslAi()
+        private void UpdateHlslAi(Vector2 activeCenter, Vector2 activeExtents)
         {
             if (fishAiCompute == null || computeKernelIndex < 0 || aiFishArea == null)
                 return;
@@ -167,8 +325,8 @@ namespace Main.Character.AI
 
             Vector2 areaCenter = aiFishArea.position;
             Vector2 areaSize = aiFishArea.rect.size;
-            fishAiCompute.SetVector("AreaCenter", new Vector4(areaCenter.x, areaCenter.y, 0f, 0f));
-            fishAiCompute.SetVector("AreaSize", new Vector4(areaSize.x, areaSize.y, 0f, 0f));
+            fishAiCompute.SetVector("AreaCenter", new Vector4(areaCenter.x, areaCenter.y, activeCenter.x, activeCenter.y));
+            fishAiCompute.SetVector("AreaSize", new Vector4(areaSize.x, areaSize.y, activeExtents.x, activeExtents.y));
 
             fishAiCompute.SetBuffer(computeKernelIndex, "InputFishes", inputBuffer);
             fishAiCompute.SetBuffer(computeKernelIndex, "OutputFishes", outputBuffer);
@@ -265,12 +423,15 @@ namespace Main.Character.AI
             fishList.Clear();
 
             // Add Player
-            var playerCharacter = FindAnyObjectByType<PlayerCharacter>();
-            fishList.Add(playerCharacter);
-            playerCharacter.OnDeath += () => fishList.Remove(playerCharacter);
+            var playerCharacter = FindAnyObjectByType<PlayerCharacter>(FindObjectsInactive.Include);
+            if (playerCharacter != null)
+            {
+                fishList.Add(playerCharacter);
+                playerCharacter.OnDeath += () => fishList.Remove(playerCharacter);
+            }
 
             // Add AI Fishes
-            var aiFishes = FindObjectsByType<AiFish>(sortMode: FindObjectsSortMode.None);
+            var aiFishes = FindObjectsByType<AiFish>(FindObjectsInactive.Include, sortMode: FindObjectsSortMode.None);
             foreach (var aiFish in aiFishes)
             {
                 fishList.Add(aiFish);
@@ -301,6 +462,7 @@ namespace Main.Character.AI
     {
         CpuJob = 0,
         HlslCompute = 1,
+        RustNative = 2,
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -358,6 +520,12 @@ namespace Main.Character.AI
         [ReadOnly]
         public float2 AreaSize;
 
+        [ReadOnly]
+        public float2 ActiveAreaCenter;
+
+        [ReadOnly]
+        public float2 ActiveAreaExtents;
+
         // Output
         [WriteOnly]
         public NativeArray<FishJobOutput> OutputResults;
@@ -384,9 +552,32 @@ namespace Main.Character.AI
             float2 closestPreyPos = float2.zero;
             float closestPreyDistance = MaxSearchDistance;
 
+            // Check if in active area
+            float2 diff = math.abs(ownPosition - ActiveAreaCenter);
+            bool needToCompute = diff.x <= ActiveAreaExtents.x && diff.y <= ActiveAreaExtents.y;
+
+            // If not in active area, we stop doing complex AI and just do nothing or wander slowly
+            if (!needToCompute)
+            {
+                // Simple wander or idle if outside camera
+                newState = (int)State.Idle;
+                focusingTime = 0f;
+                newTargetPos = ownPosition; // Stop moving
+
+                // Write output immediately and return to strictly prevent any wandering
+                OutputResults[index] = new FishJobOutput
+                {
+                    TargetPosition = newTargetPos,
+                    StateInt = newState,
+                    FocusingTime = focusingTime,
+                };
+                return;
+            }
+
             // Find target - prioritize player first
             for (int i = 0; i < FishesInput.Length; i++)
             {
+                // ... (existing logic) ...
                 // Skip self
                 if (i == index)
                     continue;

@@ -74,6 +74,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThread
     float bestPlayerDistance = MaxSearchDistanceSqr;
     float2 playerTarget = ownTarget;
 
+    bool needToCompute = false;
+    if (index < FishCount)
+    {
+        float2 diff = abs(ownPos - AreaCenter.zw); // Using AreaCenter.zw for ActiveAreaCenter
+        needToCompute = diff.x <= AreaSize.z && diff.y <= AreaSize.w; // Using AreaSize.zw for ActiveAreaExtents
+    }
+
     uint numGroups = (FishCount + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
 
     // OPTIMIZATION: Tiled N-Body approach. Each thread group cooperatively loads a tile of fishes into shared memory.
@@ -89,7 +96,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThread
         // Wait for all threads in the group to finish loading
         GroupMemoryBarrierWithGroupSync();
 
-        if (index < FishCount)
+        if (index < FishCount && needToCompute)
         {
             // 2. Process the loaded chunk
             uint numElements = min(THREAD_GROUP_SIZE, FishCount - group * THREAD_GROUP_SIZE);
@@ -161,23 +168,37 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThread
     if (index >= FishCount)
         return;
 
-    if (foundPlayer)
+    if (needToCompute)
     {
-        newTarget = playerTarget;
-        newState = 1;
-        foundTarget = true;
-        focusingTime = CurrentTime + FocusTargetDuration;
+        if (foundPlayer)
+        {
+            newTarget = playerTarget;
+            newState = 1;
+            foundTarget = true;
+            focusingTime = CurrentTime + FocusTargetDuration;
+        }
+        else if (bestPreyDistance < MaxSearchDistanceSqr)
+        {
+            newTarget = bestPreyTarget;
+            newState = 1;
+            foundTarget = true;
+            focusingTime = CurrentTime + FocusTargetDuration;
+        }
+        else if (newState == 2)
+        {
+            newTarget = fleeTarget;
+        }
     }
-    else if (bestPreyDistance < MaxSearchDistanceSqr)
+    else
     {
-        newTarget = bestPreyTarget;
-        newState = 1;
+        // Out of active area, freeze fish basically
+        if (newState != 0) 
+        {
+            newState = 0;
+            focusingTime = 0.0;
+        }
+        newTarget = ownPos;
         foundTarget = true;
-        focusingTime = CurrentTime + FocusTargetDuration;
-    }
-    else if (newState == 2)
-    {
-        newTarget = fleeTarget;
     }
 
     float2 center = AreaCenter.xy;
@@ -197,54 +218,69 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThread
 
     if (!foundTarget)
     {
-        bool ownOutOfBounds =
-            abs(ownPos.x - center.x) > halfSize.x ||
-            abs(ownPos.y - center.y) > halfSize.y;
-
-        if (ownOutOfBounds && newState != 1 && newState != 2)
+        if (!needToCompute)
         {
-            newTarget = center;
             newState = 0;
-            focusingTime = 0.0;
-            foundTarget = true;
+            newTarget = ownPos;
         }
-
-        if (newState == 1 || newState == 2)
+        else
         {
-            if (CurrentTime >= focusingTime)
+            bool ownOutOfBounds =
+                abs(ownPos.x - center.x) > halfSize.x ||
+                abs(ownPos.y - center.y) > halfSize.y;
+
+            if (ownOutOfBounds && newState != 1 && newState != 2)
             {
+                newTarget = center;
                 newState = 0;
                 focusingTime = 0.0;
-            }
-            else
-            {
-                newTarget = ownPos + ownForward * 20.0;
                 foundTarget = true;
             }
-        }
 
-        if (newState == 0 && !foundTarget)
-        {
-            float2 toNewTarget = newTarget - ownPos;
-            float closeDistSq = dot(toNewTarget, toNewTarget);
-            bool idleTargetOutOfBounds =
-                abs(newTarget.x - center.x) > halfSize.x ||
-                abs(newTarget.y - center.y) > halfSize.y;
-
-            // OPTIMIZATION: Use squared distance (closeDistSq < 4.0) instead of distance() < 2.0 
-            // to avoid expensive sqrt() operations.
-            if (closeDistSq < 4.0 || idleTargetOutOfBounds)
+            if (newState == 1 || newState == 2)
             {
-                float seedBase = own.FocusPlayerIndex.z * 17.0 + CurrentTime * 11.0;
-                float rx = Hash01(ownPos + float2(seedBase, 1.23));
-                float ry = Hash01(ownPos + float2(2.34, seedBase));
-
-                newTarget.x = lerp(center.x - halfSize.x, center.x + halfSize.x, rx);
-                newTarget.y = lerp(center.y - halfSize.y, center.y + halfSize.y, ry);
+                if (CurrentTime >= focusingTime)
+                {
+                    newState = 0;
+                    focusingTime = 0.0;
+                }
+                else
+                {
+                    newTarget = ownPos + ownForward * 20.0;
+                    foundTarget = true;
+                }
             }
 
-            newState = 0;
+            if (newState == 0 && !foundTarget)
+            {
+                float2 toNewTarget = newTarget - ownPos;
+                float closeDistSq = dot(toNewTarget, toNewTarget);
+                bool idleTargetOutOfBounds =
+                    abs(newTarget.x - center.x) > halfSize.x ||
+                    abs(newTarget.y - center.y) > halfSize.y;
+
+                // OPTIMIZATION: Use squared distance (closeDistSq < 4.0) instead of distance() < 2.0 
+                // to avoid expensive sqrt() operations.
+                if (closeDistSq < 4.0 || idleTargetOutOfBounds)
+                {
+                    float seedBase = own.FocusPlayerIndex.z * 17.0 + CurrentTime * 11.0;
+                    float rx = Hash01(ownPos + float2(seedBase, 1.23));
+                    float ry = Hash01(ownPos + float2(2.34, seedBase));
+
+                    newTarget.x = lerp(center.x - halfSize.x, center.x + halfSize.x, rx);
+                    newTarget.y = lerp(center.y - halfSize.y, center.y + halfSize.y, ry);
+                }
+
+                newState = 0;
+            }
         }
+    }
+
+    if (!needToCompute)
+    {
+        newState = 0;
+        focusingTime = 0.0;
+        newTarget = ownPos;
     }
 
     FishOutputGpu output;

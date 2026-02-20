@@ -18,7 +18,14 @@ namespace Main.Character.AI
         protected override void FixedUpdate()
         {
             base.FixedUpdate();
-            Move(moveDir, ForceMode2D.Force, multiplier: 0.25f);
+            if (math.lengthsq(moveDir) < 0.001f)
+            {
+                Rb2d.linearVelocity = UnityEngine.Vector2.zero;
+            }
+            else
+            {
+                Move(moveDir, UnityEngine.ForceMode2D.Force, multiplier: 0.25f);
+            }
         }
 
         // Movement is handled on the main thread, consuming the Job's calculated target

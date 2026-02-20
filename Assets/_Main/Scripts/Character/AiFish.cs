@@ -18,6 +18,7 @@ namespace Main.Character.AI
         protected override void FixedUpdate()
         {
             base.FixedUpdate();
+            UpdateMovement();
             if (math.lengthsq(moveDir) < 0.001f)
             {
                 Rb2d.linearVelocity = UnityEngine.Vector2.zero;

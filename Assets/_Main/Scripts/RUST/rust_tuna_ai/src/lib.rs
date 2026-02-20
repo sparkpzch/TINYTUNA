@@ -1,4 +1,6 @@
 use num_traits::Float;
+use rayon::prelude::*;
+
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -81,17 +83,18 @@ pub extern "C" fn process_fish_ai(
     }
 
     let inputs = unsafe { std::slice::from_raw_parts(input_ptr, fish_count as usize) };
-    let outputs = unsafe { std::slice::from_raw_parts_mut(output_ptr, fish_count as usize) };
 
     let focus_target_duration = 2.0;
     let max_search_dist_sqrt = max_search_distance_sq.sqrt();
 
     let mut sorted_indices: Vec<usize> = (0..(fish_count as usize)).collect();
-    sorted_indices.sort_unstable_by(|&a, &b| {
+    sorted_indices.par_sort_unstable_by(|&a, &b| {
         inputs[a].position.x.partial_cmp(&inputs[b].position.x).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    for k in 0..(fish_count as usize) {
+    let output_ptr_usize = output_ptr as usize;
+
+    (0..(fish_count as usize)).into_par_iter().for_each(|k| {
         let i = sorted_indices[k];
         let own_input = &inputs[i];
         let own_size = own_input.size;
@@ -114,12 +117,15 @@ pub extern "C" fn process_fish_ai(
         let need_to_compute = diff_x <= active_area_extents.x && diff_y <= active_area_extents.y;
 
         if !need_to_compute {
-            outputs[i] = FishJobOutput {
-                target_position: own_position,
-                state_int: 0, // Idle
-                focusing_time: 0.0,
-            };
-            continue;
+            unsafe {
+                let out_ptr = output_ptr_usize as *mut FishJobOutput;
+                *out_ptr.add(i) = FishJobOutput {
+                    target_position: own_position,
+                    state_int: 0, // Idle
+                    focusing_time: 0.0,
+                };
+            }
+            return;
         }
 
         macro_rules! check_neighbor {
@@ -267,11 +273,14 @@ pub extern "C" fn process_fish_ai(
             }
         }
 
-        outputs[i] = FishJobOutput {
-            target_position: new_target_pos,
-            state_int: new_state,
-            focusing_time,
-        };
-    }
+        unsafe {
+            let out_ptr = output_ptr_usize as *mut FishJobOutput;
+            *out_ptr.add(i) = FishJobOutput {
+                target_position: new_target_pos,
+                state_int: new_state,
+                focusing_time,
+            };
+        }
+    });
 }
 

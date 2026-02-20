@@ -291,9 +291,14 @@ namespace Main.Character.AI
             outputResults.Dispose();
         }
 
+        private bool isGpuReadbackPending = false;
+
         private void UpdateHlslAi(Vector2 activeCenter, Vector2 activeExtents)
         {
             if (fishAiCompute == null || computeKernelIndex < 0 || aiFishArea == null)
+                return;
+                
+            if (isGpuReadbackPending)
                 return;
 
             EnsureGpuBuffers(fishCacheArray.Length);
@@ -317,8 +322,17 @@ namespace Main.Character.AI
             int groupCount = Mathf.CeilToInt(fishCacheArray.Length / (float)THREAD_GROUP_SIZE);
             fishAiCompute.Dispatch(computeKernelIndex, groupCount, 1, 1);
 
-            outputBuffer.GetData(outputCache);
-            ApplyGpuOutput();
+            isGpuReadbackPending = true;
+            UnityEngine.Rendering.AsyncGPUReadback.Request(outputBuffer, (req) =>
+            {
+                isGpuReadbackPending = false;
+                if (req.hasError || !Application.isPlaying || this == null)
+                    return;
+
+                var data = req.GetData<FishOutputGpu>();
+                data.CopyTo(outputCache);
+                ApplyGpuOutput();
+            });
         }
 
         private void FillGpuInput()

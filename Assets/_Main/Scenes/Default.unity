@@ -1367,7 +1367,7 @@ MonoBehaviour:
   playerHealthUI: {fileID: 8585054743163661856}
   currentProgress: 0
   progressUI: {fileID: 120105688}
-  startSpawnAmount: 2000
+  startSpawnAmount: 3000
   winSceneName: WinScene
   loseSceneName: LoseScene
 --- !u!114 &361681544

@@ -29,32 +29,35 @@ float Hash01(float2 p)
     return frac(sin(h) * 43758.5453123);
 }
 
-bool IsInVisionCone(float2 ownPos, float2 ownForward, float2 targetPos)
-{
-    float2 toTarget = targetPos - ownPos;
-    float lenSq = dot(toTarget, toTarget);
-    if (lenSq <= 0.00001)
-        return true;
+#define THREAD_GROUP_SIZE 64
 
-    float2 direction = normalize(toTarget);
-    float dotProduct = dot(ownForward, direction);
-    return dotProduct >= MaxVisionCos;
-}
+// OPTIMIZATION: Use groupshared memory to load chunks of fish data. 
+// This reduces global memory reads by a factor of THREAD_GROUP_SIZE (64x less bandwidth).
+groupshared FishInputGpu sharedFishes[THREAD_GROUP_SIZE];
 
-[numthreads(64, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID)
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadID)
 {
     uint index = id.x;
-    if (index >= FishCount)
-        return;
 
-    FishInputGpu own = InputFishes[index];
-    float2 ownPos = own.PositionForward.xy;
-    float2 ownForward = normalize(own.PositionForward.zw);
-    float2 ownTarget = own.TargetSizeState.xy;
-    float ownSize = own.TargetSizeState.z;
-    int ownState = (int)round(own.TargetSizeState.w);
-    float ownFocusTime = own.FocusPlayerIndex.x;
+    FishInputGpu own;
+    float2 ownPos = 0;
+    float2 ownForward = 0;
+    float2 ownTarget = 0;
+    float ownSize = 0;
+    int ownState = 0;
+    float ownFocusTime = 0;
+
+    if (index < FishCount)
+    {
+        own = InputFishes[index];
+        ownPos = own.PositionForward.xy;
+        ownForward = normalize(own.PositionForward.zw);
+        ownTarget = own.TargetSizeState.xy;
+        ownSize = own.TargetSizeState.z;
+        ownState = (int)round(own.TargetSizeState.w);
+        ownFocusTime = own.FocusPlayerIndex.x;
+    }
 
     float2 newTarget = ownTarget;
     int newState = ownState;
@@ -71,56 +74,92 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float bestPlayerDistance = MaxSearchDistanceSqr;
     float2 playerTarget = ownTarget;
 
-    for (uint i = 0; i < FishCount; i++)
+    uint numGroups = (FishCount + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+
+    // OPTIMIZATION: Tiled N-Body approach. Each thread group cooperatively loads a tile of fishes into shared memory.
+    for (uint group = 0; group < numGroups; group++)
     {
-        if (i == index)
-            continue;
-
-        FishInputGpu other = InputFishes[i];
-        float2 otherPos = other.PositionForward.xy;
-        float otherSize = other.TargetSizeState.z;
-        bool isPlayer = other.FocusPlayerIndex.y > 0.5;
-
-        float2 delta = otherPos - ownPos;
-        float distSq = dot(delta, delta);
-        if (distSq > MaxSearchDistanceSqr)
-            continue;
-
-        if (!IsInVisionCone(ownPos, ownForward, otherPos))
-            continue;
-
-        if (otherSize > ownSize)
+        // 1. Load a chunk of fishes from global memory into fast shared memory
+        uint loadIndex = group * THREAD_GROUP_SIZE + groupThreadID.x;
+        if (loadIndex < FishCount)
         {
-            if (distSq < bestFleeDistance)
-            {
-                bestFleeDistance = distSq;
-                float2 fleeDir = normalize(ownPos - otherPos);
-                fleeTarget = ownPos + fleeDir * 20.0;
-                foundTarget = true;
-                newState = 2;
-                focusingTime = CurrentTime + FocusTargetDuration;
-            }
-            continue;
+            sharedFishes[groupThreadID.x] = InputFishes[loadIndex];
         }
+        
+        // Wait for all threads in the group to finish loading
+        GroupMemoryBarrierWithGroupSync();
 
-        if (otherSize < ownSize)
+        if (index < FishCount)
         {
-            if (isPlayer)
+            // 2. Process the loaded chunk
+            uint numElements = min(THREAD_GROUP_SIZE, FishCount - group * THREAD_GROUP_SIZE);
+            for (uint i = 0; i < numElements; i++)
             {
-                if (distSq < bestPlayerDistance)
+                uint globalI = group * THREAD_GROUP_SIZE + i;
+                if (globalI == index)
+                    continue;
+
+                FishInputGpu other = sharedFishes[i];
+                float2 otherPos = other.PositionForward.xy;
+
+                float2 delta = otherPos - ownPos;
+                float distSq = dot(delta, delta);
+                if (distSq > MaxSearchDistanceSqr)
+                    continue;
+
+                // OPTIMIZATION: Inlined vision cone check using rsqrt (fast inverse square root) 
+                // to avoid expensive normalize() and reuse distSq.
+                if (distSq > 0.00001)
                 {
-                    bestPlayerDistance = distSq;
-                    playerTarget = otherPos;
-                    foundPlayer = true;
+                    float invDist = rsqrt(distSq);
+                    float dotProduct = dot(ownForward, delta * invDist);
+                    if (dotProduct < MaxVisionCos)
+                        continue;
+                }
+
+                float otherSize = other.TargetSizeState.z;
+                bool isPlayer = other.FocusPlayerIndex.y > 0.5;
+
+                if (otherSize > ownSize)
+                {
+                    if (distSq < bestFleeDistance)
+                    {
+                        bestFleeDistance = distSq;
+                        // OPTIMIZATION: Use rsqrt instead of normalize() for faster vector normalization.
+                        float2 fleeDir = -delta * rsqrt(distSq);
+                        fleeTarget = ownPos + fleeDir * 20.0;
+                        foundTarget = true;
+                        newState = 2;
+                        focusingTime = CurrentTime + FocusTargetDuration;
+                    }
+                    continue;
+                }
+
+                if (otherSize < ownSize)
+                {
+                    if (isPlayer)
+                    {
+                        if (distSq < bestPlayerDistance)
+                        {
+                            bestPlayerDistance = distSq;
+                            playerTarget = otherPos;
+                            foundPlayer = true;
+                        }
+                    }
+                    else if (distSq < bestPreyDistance)
+                    {
+                        bestPreyDistance = distSq;
+                        bestPreyTarget = otherPos;
+                    }
                 }
             }
-            else if (distSq < bestPreyDistance)
-            {
-                bestPreyDistance = distSq;
-                bestPreyTarget = otherPos;
-            }
         }
+
+        GroupMemoryBarrierWithGroupSync();
     }
+
+    if (index >= FishCount)
+        return;
 
     if (foundPlayer)
     {
@@ -186,12 +225,15 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
         if (newState == 0 && !foundTarget)
         {
-            float closeDist = distance(ownPos, newTarget);
+            float2 toNewTarget = newTarget - ownPos;
+            float closeDistSq = dot(toNewTarget, toNewTarget);
             bool idleTargetOutOfBounds =
                 abs(newTarget.x - center.x) > halfSize.x ||
                 abs(newTarget.y - center.y) > halfSize.y;
 
-            if (closeDist < 2.0 || idleTargetOutOfBounds)
+            // OPTIMIZATION: Use squared distance (closeDistSq < 4.0) instead of distance() < 2.0 
+            // to avoid expensive sqrt() operations.
+            if (closeDistSq < 4.0 || idleTargetOutOfBounds)
             {
                 float seedBase = own.FocusPlayerIndex.z * 17.0 + CurrentTime * 11.0;
                 float rx = Hash01(ownPos + float2(seedBase, 1.23));
